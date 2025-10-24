@@ -309,7 +309,7 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
-
+  np->trace_mask = p->trace_mask;
   pid = np->pid;
 
   release(&np->lock);
