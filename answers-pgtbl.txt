@@ -1,0 +1,6 @@
+sfence_vma() 指令的目的是清空（刷新）TLB (Translation Lookaside Buffer)。
+etext: 这是一个由链接器脚本 (kernel/kernel.ld) 定义的符号，它标记了内核代码（.text 节）的末尾在内存中的位置。kvmmap 从这个地址开始映射内核的数据和内存。
+PHYSTOP: 这是 xv6 可用的物理内存的顶端地址。它在 kernel/memlayout.h 中定义，默认值通常是 0x88000000 (即 KERNBASE + 128MB)。
+KERNBASE 对应的物理地址: KERNBASE (虚拟地址 0x80000000) 被映射到物理地址 0x80000000。kvmmake 函数中的 kvmmap 调用建立了这个直接映射关系。
+当运行 $ pgtbltest -r 时，它会尝试读取一个未映射的（invalid）虚拟地址。这会触发一个页错误 (Page Fault)。你看到的输出应该会提到一个 "page fault" 或者类似的陷阱（trap）信息。
+这个测试（-r）的目的是验证内核能否正确处理一个用户程序对未映射内存的读取操作。当 pgtbltest -r 尝试读取一个无效的虚拟地址时，CPU 会触发一个页错误 (page fault)。这个输出表明你的页表设置和陷阱 (trap) 处理机制是正确的：它们成功捕获了这个非法访问，并（很可能）终止了该进程，而不是让整个内核系统崩溃。
