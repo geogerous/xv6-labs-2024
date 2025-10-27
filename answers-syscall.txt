@@ -1,0 +1,2 @@
+usertrap()
+7  代表： 这个值代表系统调用号 (system call number)。
