@@ -125,6 +125,29 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
+// 仿照walkaddr函数写一个函数用来检验虚拟地址是否是来自copy on write
+// pte_t*
+// cow_walk(pagetable_t pagetable, uint64 va)
+// {
+//   pte_t *pte;
+
+//   if(va >= MAXVA)
+//     return 0;
+
+//   pte = walk(pagetable, va, 0);
+//   if(pte == 0)
+//     return 0;
+//   if((*pte & PTE_V) == 0)
+//     return 0;
+//   if((*pte & PTE_U) == 0)
+//     return 0;
+//   // 检查是否来自cow的页面错误
+//   if((*pte & PTE_RSW) == 0)
+//     return 0;
+//   return pte;
+// }
+
+
 // add a mapping to the kernel page table.
 // only used when booting.
 // does not flush TLB or enable paging.
@@ -315,7 +338,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -324,17 +347,32 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    // 仅对可写页面设置COW标记
+    if(flags & PTE_W) {
+      // 禁用写并设置COW Fork标记
+      flags = (flags | PTE_F) & ~PTE_W;
+      *pte = PA2PTE(pa) | flags;
     }
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0) {
+      uvmunmap(new, 0, i / PGSIZE, 1);
+      return -1;
+    }
+    // 增加内存的引用计数
+    kaddrefcnt((char*)pa);
   }
+
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    //   kfree(mem);
+    //   goto err;
+    
+  
   return 0;
 
- err:
+
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
@@ -359,17 +397,47 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-  pte_t *pte;
+  pte_t *pte; // 1. 取消注释，我们需要 pte
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    if(va0 >= MAXVA)
-      return -1;
+    // 2. 【【【 关键修复 】】】
+    // 必须在调用 walk 之前检查这个地址
+    // 否则 walk 会因为 va >= MAXVA 而 panic
+    if(va0 >= MAXVA) {
+      return -1; // 优雅地失败，而不是 panic
+    }
+    
+    // 2. 必须使用 walk() 来获取 PTE
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+
+    // 3. 检查所有无效情况
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+      // pte 不存在, 或无效, 或不是用户页
       return -1;
-    pa0 = PTE2PA(*pte);
+    }
+
+    // 4. 关键：检查可写性
+    if((*pte & PTE_W) == 0) {
+      // 页面不可写。检查它是否是一个COW页面
+      // (假设 cowpage 检查 PTE_RSW)
+      if(cowpage(pagetable, va0) == 0) {
+        // 它是COW页面, 分配一个新页面
+        pa0 = (uint64)cowalloc(pagetable, va0);
+        if(pa0 == 0) {
+          return -1; // 分配失败
+        }
+      } else {
+        // 它不是COW页面，而且它不可写 (例如 .text 代码区)
+        // 这就是测试用例要抓的 "段错误"
+        return -1; // <-- 必须在这里失败
+      }
+    } else {
+      // 页面本身就是可写的 (例如, 栈或堆)
+      pa0 = PTE2PA(*pte);
+    }
+
+    // 5. 现在 pa0 是一个有效的、可写的物理地址
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -381,6 +449,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   }
   return 0;
 }
+
+
 
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
