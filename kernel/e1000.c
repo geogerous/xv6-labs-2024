@@ -20,6 +20,7 @@ static volatile uint32 *regs;
 
 struct spinlock e1000_lock;
 
+
 // called by pci_init().
 // xregs is the memory address at which the
 // e1000's registers are mapped.
@@ -101,8 +102,28 @@ e1000_transmit(char *buf, int len)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after send completes.
   //
-
-  
+  acquire(&e1000_lock);
+  uint32 tdh = regs[E1000_TDH];
+  uint32 tdt = regs[E1000_TDT];
+  if((tx_ring[tdt].status & E1000_TXD_STAT_DD) && (tdh != (tdt + 1) % TX_RING_SIZE)){
+    // this descriptor is free
+    if(tx_bufs[tdt] != 0){
+      // free the old buffer
+      kfree(tx_bufs[tdt]);
+    }
+    tx_ring[tdt].length = len;
+    tx_ring[tdt].addr = (uint64) buf;
+    tx_ring[tdt].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+    tx_ring[tdt].status = 0;
+    tx_bufs[tdt] = buf;
+    regs[E1000_TDT] = (tdt + 1) % TX_RING_SIZE;
+  } else {
+    // this descriptor is not free
+    release(&e1000_lock);
+    kfree(buf);
+    return -1;
+  }
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,7 +136,27 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver a buf for each packet (using net_rx()).
   //
-
+  uint32 rdt = regs[E1000_RDT];
+  uint32 i = (rdt + 1) % RX_RING_SIZE;
+  while(i != rdt){
+    if(rx_ring[i].status & E1000_RXD_STAT_DD){
+      // this descriptor is full
+      uint64 len = rx_ring[i].length;
+      net_rx(rx_bufs[i], len);
+      // free the buffer
+      rx_bufs[i] = kalloc();
+      if(rx_bufs[i] == 0)
+        return;
+      rx_ring[i].addr = (uint64) rx_bufs[i];
+      rx_ring[i].status = 0;
+      i = (i + 1) % RX_RING_SIZE;
+    } else {
+      // this descriptor is not full
+      break;
+    }
+  }
+  regs[E1000_RDT] = (i - 1) % RX_RING_SIZE;
+  return;
 }
 
 void

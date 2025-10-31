@@ -142,6 +142,7 @@ elif sys.argv[1] == "ping":
         sock.sendto(buf, raddr)
 elif sys.argv[1] == "grade":
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('127.0.0.1', SERVERPORT))
 
     # first, listen for a single UDP packet sent by xv6,

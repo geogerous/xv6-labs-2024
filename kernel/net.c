@@ -19,6 +19,116 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
 
+struct packets_queue {
+  struct packets_queue *next;
+  char *buf;
+  int len;
+};
+
+static struct bound_port {
+  int port;
+  struct proc *p;
+  struct bound_port *next;
+  struct packets_queue *h;
+  struct packets_queue *t;
+  int packets_len;
+} *bound_ports = 0;
+
+static struct bound_port *find_bound_port(int port)
+{
+  struct bound_port *bp = bound_ports;
+  while(bp){
+    if(bp->port == port)
+      return bp;
+    bp = bp->next;
+  }
+  return 0;
+}
+
+static void add_bound_port(int port, struct proc *p)
+{
+  struct bound_port *bp = kalloc();
+  if(bp == 0){
+    printf("add_bound_port: kalloc failed\n");
+    return;
+  }
+  bp->port = port;
+  bp->p = p;
+  bp->next = bound_ports;
+  bound_ports = bp;
+}
+
+// static void remove_bound_port(int port)
+// {
+//   struct bound_port *bp = bound_ports;
+//   struct bound_port *prev = 0;
+//   while(bp){
+//     if(bp->port == port){
+//       if(prev)
+//         prev->next = bp->next;
+//       else
+//         bound_ports = bp->next;
+//       if(bp->h){
+//         struct packets_queue *pq = bp->h;
+//         while(pq){
+//           struct packets_queue *next = pq->next;
+//           kfree(pq);
+//           pq = next;
+//         }
+//       }
+//       kfree(bp);
+//       return;
+//     }
+//     prev = bp;
+//     bp = bp->next;
+//   }
+// }
+
+static void init_packets_queue(struct bound_port *bp)
+{
+  bp->h = 0;
+  bp->t = 0;
+  bp->packets_len = 0;
+}
+
+static void add_packet_to_queue(struct bound_port *bp, char *buf, int len)
+{
+  struct packets_queue *pq = kalloc();
+  if(pq == 0){
+    printf("add_packet_to_queue: kalloc failed\n");
+    return;
+  }
+  if(bp->packets_len >= MAX_PACKETS_QUEUE_LEN){
+    printf("add_packet_to_queue: too many packets\n");
+    kfree(buf);
+    kfree(pq);
+    return;
+  }
+  pq->buf = buf;
+  pq->len = len;
+  pq->next = 0;
+  if(bp->h == 0){
+    bp->h = pq;
+    bp->t = pq;
+  } else {
+    bp->t->next = pq;
+    bp->t = pq;
+  }
+  bp->packets_len++;
+}
+
+static struct packets_queue *remove_packet_from_queue(struct bound_port *bp)
+{
+  if(bp->h == 0)
+    return 0;
+  struct packets_queue *pq = bp->h;
+  bp->h = pq->next;
+  if(bp->h == 0)
+    bp->t = 0;
+  bp->packets_len--;
+  return pq;
+}
+
 void
 netinit(void)
 {
@@ -37,8 +147,24 @@ sys_bind(void)
   //
   // Your code here.
   //
+  struct proc *p = myproc();
+  int port;
 
-  return -1;
+  argint(0, &port);
+  if(port < 0 || port > 65535){
+    printf("bind: port is not in the allowed range\n");
+    return -1;
+  }
+  if(find_bound_port(port)){
+    printf("bind: port %d already bound\n", port);
+    return -1;
+  }
+  acquire(&netlock);
+  add_bound_port(port, p);
+  init_packets_queue(find_bound_port(port));
+  release(&netlock);
+
+  return 0;
 }
 
 //
@@ -77,7 +203,72 @@ sys_recv(void)
   //
   // Your code here.
   //
-  return -1;
+  struct proc *p = myproc();
+  int dport;
+  uint64 src;
+  uint64 sport;
+  uint64 bufaddr;
+  int maxlen;
+
+  argint(0, &dport);
+  argaddr(1, &src);
+  argaddr(2, &sport);
+  argaddr(3, &bufaddr);
+  argint(4, &maxlen);
+
+  acquire(&netlock);
+  struct bound_port *bp = find_bound_port(dport);
+  if(bp == 0){
+    release(&netlock);
+    printf("recv: no process bound to port\n");
+    return -1;
+  }
+
+  while(bp->h == 0){
+    if(killed(p)){
+      release(&netlock);
+      return -1;
+    }
+    sleep(bp, &netlock);
+  }
+
+  struct packets_queue *pq = remove_packet_from_queue(bp);
+  char *buf = pq->buf;
+  struct ip *ip = (struct ip *) (buf + sizeof(struct eth));
+  struct udp *udp = (struct udp *) (ip + 1);
+  uint32 ip_src = ntohl(ip->ip_src);
+  uint16 udp_sport = ntohs(udp->sport);
+  int len = ntohs(udp->ulen);
+
+  if(copyout(p->pagetable, src, (char *)&ip_src, sizeof(ip->ip_src)) < 0){
+    kfree(buf);
+    kfree(pq);
+    release(&netlock);
+    printf("recv: copyout failed\n");
+    return -1;
+  }
+
+  if(copyout(p->pagetable, sport, (char *)&udp_sport, sizeof(udp->sport)) < 0){
+    kfree(buf);
+    kfree(pq);
+    release(&netlock);
+    printf("recv: copyout failed\n");
+    return -1;
+  }
+
+  if(maxlen > len - 8)
+    maxlen = len - 8;
+  if(copyout(p->pagetable, bufaddr, (char *)(udp + 1), maxlen) < 0){
+    kfree(buf);
+    kfree(pq);
+    release(&netlock);
+    printf("recv: copyout failed\n");
+    return -1;
+  }
+  kfree(buf);
+  kfree(pq);
+  release(&netlock);
+  return maxlen;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -191,7 +382,26 @@ ip_rx(char *buf, int len)
   //
   // Your code here.
   //
-  
+  struct eth *eth = (struct eth *) buf;
+  struct ip *ip = (struct ip *) (eth + 1);
+  if(ip->ip_p != IPPROTO_UDP){
+    printf("ip_rx: not UDP\n");
+    kfree(buf);
+    return;
+  }
+  struct udp *udp = (struct udp *) (ip + 1);
+  int dport = ntohs(udp->dport);
+  acquire(&netlock);
+  struct bound_port *bp = find_bound_port(dport);
+  if(bp == 0){
+    printf("ip_rx: no process bound to port %d\n", dport);
+    kfree(buf);
+    release(&netlock);
+    return;
+  }
+  add_packet_to_queue(bp, buf, len);
+  wakeup(bp);
+  release(&netlock);
 }
 
 //
