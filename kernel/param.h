@@ -3,6 +3,7 @@
 #else
 #define NPROC        64  // maximum number of processes (speedsup bigfile)
 #endif
+
 #define NCPU          8  // maximum number of CPUs
 #define NOFILE       16  // open files per process
 #define NFILE       100  // open files per system
@@ -29,5 +30,6 @@
 #else
 #define USERSTACK    1     // user stack pages
 #endif
+
 
 
